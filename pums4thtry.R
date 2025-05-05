@@ -235,6 +235,7 @@ incomevars <- data2 %>%
   mutate(
     INCTOT = adjust_for_inflation(INCTOT, YEAR)) %>%
   filter(
+    INCTOT > 0,
     !(INCTOT %in% c(0, 1, 9999999,9999998))) %>%
   group_by(join_key, YEAR) %>%
   summarise(
@@ -244,8 +245,8 @@ incomevars <- data2 %>%
 #note: all the hh vars could be done together in one command, but the person level couldn't
 #because there we want all values of PERNUM included
 
-#note: why is 2014 income so much lower than 2009 income in many cases? recovery from recession so bad?
-#check: look at national level. And here, 2009 < 2014 < 2019 so all I think is good
+#note: why is 2014 income so much lower than 2009 income in many observations? Was recovery from recession so bad?
+#check: look at national level. And here, incomes for 2009 < 2014 < 2019 so all I think is good
 data %>%
   filter(
     !(INCTOT %in% c(0, 1, 9999999,9999998))
@@ -301,7 +302,7 @@ comparisonplot <- ggplot(comparison_df, aes(x = SE_A14015_001, y = overall_hhinc
   theme_minimal()
 print(comparisonplot)
 
-#ok much better! save and send to pi
+#ok much better than last time! save and send to pi
 ggsave("hhinccomparison2.png", plot = comparisonplot, width = 10, height = 6, dpi = 300)
 
 #___________________________________________________________________________________________
