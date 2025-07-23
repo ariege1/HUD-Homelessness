@@ -192,11 +192,11 @@ adjust_for_inflation <- function(value, year) {
 
 #hh income variables first
 hhinc <- data2 %>%
-  mutate(
-    HHINCOME = adjust_for_inflation(HHINCOME, YEAR)) %>%
   filter(!(HHINCOME %in% c(0, 9999999)),
          OWNERSHP != 0,
          PERNUM == 1) %>%
+  mutate(
+    HHINCOME = adjust_for_inflation(HHINCOME, YEAR)) %>%
   group_by(join_key, YEAR) %>%
   summarise(
     overall_hhinc = wtd.quantile(HHINCOME, weights = HHWT, probs = 0.5, na.rm = TRUE),
@@ -211,14 +211,14 @@ hhinc <- data2 %>%
 
 #hh rent variables second
 rentvars <- data2 %>%
-  mutate(
-    RENTGRS = adjust_for_inflation(RENTGRS, YEAR),
-    RENT = adjust_for_inflation(RENT, YEAR)) %>%
-  filter(
+filter(
     RENTGRS != 0,
     !(RENT %in% c(0, 1, 9999)),
     PERNUM == 1                   #whether or not you filter for renters (OWNERSHIP==2) result is same
   ) %>%
+  mutate(
+    RENTGRS = adjust_for_inflation(RENTGRS, YEAR),
+    RENT = adjust_for_inflation(RENT, YEAR)) %>%
   group_by(join_key, YEAR) %>%
   summarise(
     median_gross_rent = wtd.quantile(RENTGRS, weights = HHWT, probs = 0.5, na.rm = TRUE),
@@ -232,11 +232,11 @@ rentvars <- data2 %>%
 
 #person level income third
 incomevars <- data2 %>%
-  mutate(
-    INCTOT = adjust_for_inflation(INCTOT, YEAR)) %>%
-  filter(
+filter(
     INCTOT > 0,
     !(INCTOT %in% c(0, 1, 9999999,9999998))) %>%
+  mutate(
+    INCTOT = adjust_for_inflation(INCTOT, YEAR)) %>%
   group_by(join_key, YEAR) %>%
   summarise(
     medianincome = round(wtd.quantile(INCTOT, weights =PERWT, probs = 0.5, na.rm = TRUE), 0)
