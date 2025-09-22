@@ -1,0 +1,748 @@
+---
+title: "HUD & Homelessness Data Analysis"
+author: "ARIEGE BESSON"
+date: "September 12, 2025"
+output: pdf_document
+urlcolor: blue
+header-includes:
+  - \usepackage{float}
+---
+
+# Project Description
+
+The goal of this research is to examine the determinants of city-level homelessness and to determine what may prevent it in the future. Our work builds on research presented in the book Homelessness is a Housing Problem, which uses data from HUD homelessless counts to posit that at the city level, homelessness is explained primarily by high rents and low vacancy rates. Our contributions to furthering this research includes gathering data on 115 HUD geographies (as opposed to 30) and using arguably better measures of serious drug use and of social services. We wish to contribute to an even more robust analysis of HUD and related data, and to expand on theories of how exactly the housing market affects homelessness.
+
+## Our Data
+
+- HUD Point-In-Time homelessness count data
+  + Homelessness is difficult to estimate. Almost certainly a lot of HUD PIT data are undercounted, and there may be systematic measurement differences both across places and within places over time. HUD tries to account for these errors, and we have accounted for some as well in our regressions, but it’s a fact of life that these data are messy.
+- Census data
+- Census microdata (PUMS)
+- Drug use data (CDC Wonder database)
+- Climate data (NOAA)
+- Public welfare spending data (Lincoln Institute's FiSC database & Willamette Government Finance Database)
+
+Panel dataset used for analysis:
+
+- 115 geographies (covering about 50% of the total homeless population as counted by HUD for each year)
+- 7 years of data (2007, 2009, 2012, 2014, 2017, 2019, 2022)
+
+## Setup
+
+- load packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(knitr.kable.NA = "")
+options(knitr.kable.format = "latex")  # force latex globally
+
+library(tidyverse)
+library(stringr)
+library(haven)
+library(tidycensus)
+library(tidyr)
+library(ipumsr)
+library(Hmisc)
+library(data.table)
+library(patchwork)
+library(here)
+library(knitr)
+library(kableExtra)
+library(fixest)
+library(sandwich)
+library(lmtest)
+library(dplyr)
+```
+- clear the environment
+```{r, eval=FALSE, include=FALSE}
+rm(list = ls())
+```
+- call in data
+```{r, include=FALSE}
+comp <- read.csv(file.path("PUMS data/v13_short.csv"))
+```
+
+# Analysis
+
+## Summary Statistics
+
+**Total homelessness over time**
+
+Graph total homelessness (represented in our data) by year and category. Note: Our sample represents about 60 percent of the total homelessness counted by HUD in 2022, and likely over 90 percent of non-rural homelessness in 2022.
+
+```{r pressure, echo=FALSE, message=FALSE, warning=FALSE}
+# bring in df of overall county
+df <- tibble(
+  year = c(2007, 2009, 2012, 2014, 2017, 2019, 2022),
+  sum_tot_homeless = c(331996, 300519, 301853, 295419, 304411, 315203, 305471),
+  sum_shelt_tot_homeless = c(204599, 207499, 209649, 220878, 208371, 206772, 186253),
+  sum_unshelt_homeless = c(127397, 93020, 92204, 74541, 96040, 108431, 119218),
+  sum_chronic_indiv = c(65227, 54942, 48325, 43719, 50479, 55212, 73611)
+)
+
+# Reshape to long format
+df_long <- df %>%
+  pivot_longer(
+    cols = starts_with("sum_"),
+    names_to = "variable",
+    values_to = "count"
+  )
+
+# Plot with ggplot
+library(ggplot2)
+library(scales)
+
+# Custom color palette (more muted, RMarkdown-like)
+my_colors <- c(
+  "sum_tot_homeless" = "#1b9e77", 
+  "sum_shelt_tot_homeless" = "#d95f02", 
+  "sum_unshelt_homeless" = "#7570b3", 
+  "sum_chronic_indiv" = "#e7298a"
+)
+
+# Explicitly set factor levels to control order of colors & legend
+df_long <- df_long %>%
+  mutate(variable = factor(variable, levels = c(
+    "sum_tot_homeless",
+    "sum_shelt_tot_homeless",
+    "sum_unshelt_homeless",
+    "sum_chronic_indiv"
+  )))
+
+ggplot(df_long, aes(x = year, y = count, color = variable)) +
+  geom_line(size = 1.1) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = comma) +
+  scale_color_manual(values = my_colors,
+                     labels = c("Total Homeless",
+                                "Sheltered Homeless",
+                                "Unsheltered Homeless",
+                                "Chronically Homeless Individuals")) +
+  labs(
+    title = "Homeless Counts Over Time",
+    x = "Year",
+    y = "Count",
+    color = NULL
+  ) +
+  theme_minimal(base_family = "serif", base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    panel.grid.minor = element_blank()  # removes distracting minor gridlines
+  )
+
+```
+
+Table showing total homelessness and percentages of unsheltered and chronic homelessness over time
+
+```{r, echo=FALSE}
+library(dplyr)
+
+table1 <- comp %>%
+  group_by(year) %>%
+  summarise(
+    Sheltered     = sum(shelt_tot_homeless, na.rm = TRUE),
+    Unsheltered   = sum(unshelt_homeless, na.rm = TRUE),
+    Total         = sum(tot_homeless, na.rm = TRUE),
+    Chronic       = sum(chronic_indiv, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Pct_Unsheltered = round(Unsheltered / Total, 2),
+    Pct_Chronic     = round(Chronic / Total, 2)
+  ) %>%
+  select(Year = year, Sheltered, Unsheltered, Total, 
+         Pct_Unsheltered, Chronic, Pct_Chronic)
+
+knitr::kable(table1, caption = "Unsheltered and Chronic Homelessness Over Time")
+```
+
+**Geographies with the highest percentages of total homelessness: New York and Los Angeles**
+
+What percentage of total homelessness per year, for the whole country as counted by HUD, does our sample represent?
+
+The table below shows our sample’s total homeless and our sample’s total homeless as a percent of the national total provided by the HUD PIT counts.
+
+```{r, echo=FALSE}
+library(dplyr)
+library(tibble)
+
+#1 HUD PIT totals 
+hud_pit_totals <- tribble(
+  ~Year, ~HUD_PIT_Total,
+  2007, 647258,
+  2009, 630227,
+  2012, 621553,
+  2014, 576450,
+  2017, 550996,
+  2019, 567715,
+  2022, 582462
+)
+
+#2 sample totals and NY+LA totals
+sample_totals <- comp %>%
+  group_by(year) %>%
+  summarise(
+    Our_Sample_Total = sum(tot_homeless, na.rm = TRUE),
+    NY_LA            = sum(tot_homeless[join_key %in% c("06037", "3651000")], 
+                           na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rename(Year = year)
+
+#3. Join totals and calculate percentages
+table2 <- hud_pit_totals %>%
+  left_join(sample_totals, by = "Year") %>%
+  mutate(
+    Pct_Our_Sample_Covers = round(Our_Sample_Total / HUD_PIT_Total, 2),
+    Pct_NYLA_of_HUD       = round(NY_LA / HUD_PIT_Total, 2)
+  ) %>%
+  select(Year, HUD_PIT_Total, Our_Sample_Total, Pct_Our_Sample_Covers,
+         NY_LA, Pct_NYLA_of_HUD)
+
+knitr::kable(table2, caption = "Coverage of Our Sample vs HUD PIT Counts")
+
+```
+
+In 2022, New York and LA by themselves accounted for 43 percent of the count in our sample and 22 percent of the total HUD count. To put this in perspective, LA County is 3 percent of the US population and one tenth of one percent of its land area, and has some 12 percent of all its homeless.
+
+**Rates of homelessness**
+
+Rates of homelessness are also very uneven across space. In 2022 the mean homelessness rate is 17 per 10,000 residents, and the median is 12.  But there are nine places with a rate over 50. These nine places are 60 percent of the homeless in the sample.
+
+The table below shows the mean and median homelessness rates per 10,000 residents by year.
+
+```{r, echo=FALSE}
+library(dplyr)
+
+table3 <- comp %>%
+  group_by(year) %>%
+  summarise(
+    Mean_Homeless_Rate   = round(mean(homeless_rate*0.1, na.rm = TRUE), 1),
+    Median_Homeless_Rate = round(median(homeless_rate*0.1, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+knitr::kable(table3, caption = "Mean and Median Homeless Rates by Year")
+
+```
+
+The table below shows places with a mean homelessness rate per 10k residents of over 50 for 2022.
+
+```{r, echo=FALSE}
+table4 <- comp %>%
+  select(year, msa_name, state_abbr, homeless_rate, pct_tot_homeless) %>%
+  filter(year == 2022,
+         homeless_rate*0.1 >= 50) %>%
+  mutate(rate_10k = homeless_rate*0.1) %>%
+  arrange(desc(rate_10k))%>%
+  select(-homeless_rate)
+
+knitr::kable(table4, caption = "Places with High Homeless Rates in 2022")
+```
+
+In 2007, when homeless counts were at their highest, we see a similar pattern though with some additions: Detroit and Philadelphia loom larger, and Birmingham AL has a high rate (albeit a pretty small absolute number). NYC and SF remain dominant as shares of the US total.
+
+The table below shows places with a mean homelessness rate per 10k residents of over 50 for 2007.
+
+
+```{r, echo=FALSE}
+table5 <- comp %>%
+  select(year, msa_name, state_abbr, homeless_rate, pct_tot_homeless) %>%
+  filter(year == 2007,
+         homeless_rate*0.1 >= 50) %>%
+  mutate(rate_10k = homeless_rate*0.1) %>%
+  arrange(desc(rate_10k)) %>%
+  select(-homeless_rate)
+
+knitr::kable(table5, caption = "Places with High Homeless Rates in 2007")
+```
+
+## Variation
+
+The fact that a small number of places account for most of the homelessness in the sample suggests potential problems with modelling homelessness statistically.
+
+**Variance decomposition**
+
+Variable: homeless rate
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(plm)
+pdata <- pdata.frame(comp, index = c("join_key", "year"))
+
+pvar(pdata$homeless_rate)
+
+summary(pdata$homeless_rate)
+
+```
+
+What this shows is that the variance in homeless rates is mostly explained by variance between places, as opposed to variance within place (and across years). ~80% of variance is between counties and ~3% of variance is across years, with the rest of the variance being residual.
+
+The variance decomposition below, which is for the variable homeless counts, shows even more variance explained by place (95%) and very little by year (0.02%). This makes sense, as a count homelessness is very correlated with the size (population) of a place.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+pvar(pdata$tot_homeless)
+summary(pdata$tot_homeless)
+
+```
+
+**Within-place variation in homelessness rates**
+
+Another way to illustrate the stability of homelessness within places is by choosing a cutoff for “very high” homeless rates.  We’ll use the 90th percentile as a cutoff rate, which is 432 homeless people per 100,000 population (or 43 homeless people per 10,000 population) for the seven years of data we have. If we do this, we see the following:
+
+- In the whole sample, there were 80 observations (out of 798) that met this threshold of very high homelessness at least once, representing 26 out of 114 places. 
+- 77 percent of places never exceeded this threshold
+- 23 percent of places exceeded the threshold at least once (26/114)
+- 81 percent of the places that were beneath this threshold once were always beneath it (88/109); 19 percent of places above it once were always above it (5/26)
+- 98 percent of places that were below the threshold in one time period were below it in the next; 70 percent above it in one period were above it in the next
+
+Let's look at the homeless rates in Los Angeles County and in Marin County, CA:
+
+```{r, echo=FALSE}
+table6 <- comp %>%
+  select(year, join_key, msa_name, state_abbr, homeless_rate) %>%
+  filter(join_key == "06037")%>%
+  mutate(rate_10k = homeless_rate*0.1) %>%
+  arrange(year) %>%
+  select(-homeless_rate, -join_key)
+
+knitr::kable(table6, caption = "Los Angeles County Homeless Rate")
+```
+```{r, echo=FALSE}
+table7 <- comp %>%
+  select(year, join_key, msa_name, state_abbr, homeless_rate) %>%
+  filter(join_key == "06041")%>%
+  mutate(rate_10k = homeless_rate*0.1) %>%
+  arrange(year) %>%
+  select(-homeless_rate, -join_key)
+
+knitr::kable(table7, caption = "Marin County Homeless Rate")
+```
+There’s a fair bit of variance within Los Angeles (the rate in 2022 is double the rate in 2012) but we also know Los Angeles is something of an outlier. Marin County looks more like the average place, and we see much less within-place variance.
+
+**Average percent variation across years**
+
+Another method to measure within-place variation is the average percent variation across years. Here we can pick out places with high variation over time.
+
+The average percent variation between years, across all places, for total 	
+homelessness (tot_homeless) is 7.50%. Places with the highest average percent
+changes include:
+
+- Orleans Parish & Jefferson Parish LA (49.13%)
+- Salem County NJ (-28.89%)
+- Wayne County MI (-25.02%)
+- Tompkins County NY (22.40%)
+- St. Clair County IL (-20.50%)
+
+All other geographies have less than |20|% average percent variation between years.
+
+**Coefficient of variation**
+
+Looking at the coefficient of variation, we see somewhat similar results. Coefficient of variation is the standard deviation divided by the mean and gives a non-directional, scale-independent measure of overall variability/stability across time. The coefficient of variation for total homeless and homeless rate is the same. The geographies with a coefficient of variation above 0.70 are: 
+
+- Salem County NJ (1.42)
+- Wayne County MI (1.18)
+- Orleans Parish & Jefferson Parish LA (0.95)
+- Bergen County NJ (0.81)
+- Hillsborough County FL (0.73)
+- Rockland County NY (0.72)
+
+**Patterns in within-place variability**
+
+Grouping geographies by trends in homelessness over time: Here I used row wise standardization and then k-means to group places into three clusters based on the shape of homelessness over time. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+wide_data <- comp %>%
+  select(join_key, year, tot_homeless) %>%
+  pivot_wider(names_from = year, values_from = tot_homeless)
+
+#and combine the rows
+wide <- wide_data %>%
+  group_by(join_key) %>%
+  summarise(across(everything(),
+                   ~ if (all(is.na(.))) NA else na.omit(.)[1],
+                   .names = "{.col}"),
+            .groups = "drop")
+
+
+#b Remove join_key for clustering
+mat <- as.matrix(wide[,-1])
+km <- kmeans(scale(mat, center = TRUE, scale = TRUE), centers = 3)
+
+# Add cluster to data
+wide$cluster <- km$cluster
+
+#c reshape to long so I can graph
+long2 <- wide %>%
+  pivot_longer(
+    cols = c(`2007`, `2009`, `2012`, `2014`, `2017`, `2019`, `2022`),
+    names_to = "year",
+    values_to = "value"
+  ) %>%
+  mutate(
+    year = as.integer(year),        # Make sure year is numeric
+    cluster = factor(cluster)       # Ensure cluster is a factor
+  )
+
+wide <- wide %>%
+  select(-cluster)
+
+#step 2 scale it
+#We can use t() to transpose, scale() to standardize, then transpose back
+# Keep the place column separate
+places <- wide$join_key
+data_only <- wide[ , -1]  # time period columns only
+
+# Row-standardization: subtract mean & divide by SD for each row
+row_scaled <- t(scale(t(data_only), center = TRUE, scale = TRUE))
+
+# Combine back with place names
+df_scaled <- data.frame(place = places, row_scaled)
+
+#step 3 run kmeans and get clusters
+set.seed(123)
+km_result <- kmeans(df_scaled[ , -1], centers = 3)
+df_scaled$cluster <- km_result$cluster
+
+#step 4 rename and reshape to long so I can graph
+#rename
+df_scaled <- df_scaled %>%
+  rename_with(~ sub("^X", "", .), starts_with("X"))
+
+
+long3 <- df_scaled %>%
+  pivot_longer(
+    cols = c(`2007`, `2009`, `2012`, `2014`, `2017`, `2019`, `2022`),
+    names_to = "year",
+    values_to = "value"
+  ) %>%
+  mutate(
+    year = as.integer(year),        # Make sure year is numeric
+    cluster = factor(cluster)       # Ensure cluster is a factor
+  )
+
+#step 4 plot it we have two ways
+#a ggplot
+
+ggplot(long3, aes(x = year, y = value, group = place, color = factor(cluster))) +
+  geom_line(alpha = 0.8) +
+  labs(
+    title = "Trends In Total Homelessness Over Time by K-means Cluster",
+    x = "Year",
+    y = "Homeless count (row-standardized)",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+That was mostly just for fun.
+
+## Correlations
+
+What variables, if any, have a strong correlation with homelessness?
+
+**Within-county correlations**
+
+Within-place (demeaned) correlations measure whether two changes over time inside the same place are associated. Demeaning removes any cross-sectional (between-place) differences. However, we have only 7 data points for each place, resulting in low power, noisy estimates, and small correlations. These correlations can be used to see whether changes in a given variable within a place over time lead to changes in homelessness; causal language requires more assumptions.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results='asis'}
+#start with within-county correlation (demean by county)
+# Demean variables by county
+comp_demeaned <- comp %>%
+  group_by(join_key) %>%
+  mutate(across(where(is.numeric), ~ . - mean(., na.rm = TRUE))) %>%
+  ungroup()
+
+# Correlation on demeaned data
+num_vars_demeaned <- comp_demeaned[sapply(comp_demeaned, is.numeric)]
+cor_with_homeless <- sapply(num_vars_demeaned,
+                            function(x) cor(x, num_vars_demeaned$homeless_rate, use = "complete.obs"))
+#sort(cor_with_homeless, decreasing = TRUE)
+
+#ok but how to see statistical significance of these?
+# Function to compute correlation + p-value
+cor_with_p <- function(x, y) {
+  test <- cor.test(x, y, use = "complete.obs")
+  data.frame(cor = test$estimate,
+             p.value = test$p.value)
+}
+
+# Apply to each numeric variable (demeaned version from Option B)
+results <- lapply(num_vars_demeaned, function(x) cor_with_p(x, num_vars_demeaned$homeless_rate))
+
+# Turn into a tidy dataframe
+results_df <- do.call(rbind, results)
+results_df$variable <- rownames(results_df)
+
+#add significance stars
+results_df <- results_df %>%
+  mutate(sig = case_when(
+    p.value < 0.001 ~ "***",
+    p.value < 0.01  ~ "**",
+    p.value < 0.05  ~ "*",
+    TRUE ~ ""
+  ))
+
+#clean up and select only the important columns
+table_within <- results_df %>%
+  select(variable, cor, p.value, sig) %>%
+  filter(variable %in% c(
+    "tot_pop", "percap_inc", "owners_hh_inc", "renters_hh_inc",
+    "overall_hh_inc", "mgr", "lowerq_contractrent", "mgr_80s",
+    "share_renter", "share_sfd", "share_black", "share_lbrforce",
+    "share_employed", "share_unemployed", "share_pov_18to64",
+    "share_pov_65plus", "share_no_hs", "share_seasonal",
+    "share_veterans", "share_divorced", "share_vacant_onmarket",
+    "share_vacant", "share_excess_bdrm", "share_excess_bdrm_sfh",
+    "share_crowded", "share_vli_crowded", "share_vli_disability",
+    "share_vli_alone", "share_vli_roommate", "share_vli_gq",
+    "share_vli_rv", "share_vli_moved", "share_vli_moved_far",
+    "tot_wages", "tot_employment", "avg_wage", "welf_percap",
+    "deaths", "crude_rate", "avg_pending", "avg_temp_jan",
+    "avg_temp_jul", "homeless_rate"
+  )) %>%
+  arrange(desc(cor)) %>%
+  mutate(
+    cor = round(cor, 3),
+    p.value = format.pval(p.value, digits = 3, eps = 0.001)
+  )
+
+#create a clean kable
+kable(table_within,
+      caption = "Within-County Correlations with Homeless Rate (demeaned by county)",
+      format = "latex",
+      booktabs = TRUE,
+      digits = 2,
+      align = c("l","c","c","c")) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position"),  # keeps table where it appears
+    font_size = 10
+  ) %>%
+  row_spec(0, bold = TRUE, background = "gray!20")
+```
+
+**By-year correlations**
+
+By-year correlations are influenced by variation between places (eg size, urban/suburban/rural, other characteristics of place), which we already know is high. However, these correlations can help pick out which characteristics different places (in the same year) are associated with higher homeless rates. This can be used for targeting policy or for descriptive comparisons.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+safe_cor <- function(x, y) {
+  if (all(is.na(x)) || all(is.na(y))) return(NA_real_)
+  if (length(unique(na.omit(x))) < 2 || length(unique(na.omit(y))) < 2) return(NA_real_)
+  cor(x, y, use = "complete.obs")
+}
+
+# Compute correlations by year, reshape wide
+by_year_corrs_wide <- comp %>%
+  group_by(year) %>%
+  summarise(across(where(is.numeric),
+                   ~ safe_cor(.x, homeless_rate),
+                   .names = "{.col}"),
+            .groups = "drop") %>%
+  pivot_longer(-year, names_to = "variable", values_to = "correlation") %>%
+  pivot_wider(names_from = year, values_from = correlation)
+
+# Filter variables of interest, round, and sort by 2022 correlation
+table9 <- by_year_corrs_wide %>%
+  filter(variable %in% c(
+    "tot_pop", "percap_inc", "owners_hh_inc", "renters_hh_inc",
+    "overall_hh_inc", "mgr", "lowerq_contractrent", "mgr_80s",
+    "share_renter", "share_sfd", "share_black", "share_lbrforce",
+    "share_employed", "share_unemployed", "share_pov_18to64",
+    "share_pov_65plus", "share_no_hs", "share_seasonal",
+    "share_veterans", "share_divorced", "share_vacant_onmarket",
+    "share_vacant", "share_excess_bdrm", "share_excess_bdrm_sfh",
+    "share_crowded", "share_vli_crowded", "share_vli_disability",
+    "share_vli_alone", "share_vli_roommate", "share_vli_gq",
+    "share_vli_rv", "share_vli_moved", "share_vli_moved_far",
+    "tot_wages", "tot_employment", "avg_wage", "welf_percap",
+    "deaths", "crude_rate", "avg_pending", "avg_temp_jan",
+    "avg_temp_jul", "homeless_rate"
+  )) %>%
+  mutate(across(-variable, ~ round(.x, 2))) %>%
+  arrange(desc(`2022`))
+
+# Pretty kable
+table9 %>%
+  kable(caption = "Correlations with Homeless Rate by Year (Filtered, Sorted Descending in 2022)",
+        format = "latex", booktabs = TRUE,
+        col.names = c("Variable", unique(by_year_corrs_wide %>% names() %>% setdiff("variable")))) %>%
+  kable_styling(latex_options = c(position = "H", "striped", "scale_down"), 
+                font_size = 10, position = "center") %>%
+  row_spec(0, bold = TRUE, background = "gray!20") %>%   # header row shaded
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2:ncol(table9), width = "6em")
+```
+
+\newpage
+**Excess bedroom variable** 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# Filter variables of interest, round, and sort by 2022 correlation
+table10 <- by_year_corrs_wide %>%
+  filter(variable %in% c("share_excess_bdrm", "share_excess_bdrm_sfh")) %>%
+  mutate(across(-variable, ~ round(.x, 2))) %>%
+  arrange(desc(`2022`))
+
+# Pretty kable
+table10 %>%
+  kable(caption = "Excess Bedroom Variables Correlations with Homeless Rate by Year",
+        format = "latex", booktabs = TRUE,
+        col.names = c("Variable", unique(by_year_corrs_wide %>% names() %>% setdiff("variable")))) %>%
+  kable_styling(latex_options = c("striped", position = "H"), 
+                position = "center") %>%
+  row_spec(0, bold = TRUE, background = "gray!15") %>%  # LaTeX color, not hex
+  column_spec(1, bold = TRUE, width = "8em")            # works in LaTeX too
+```
+
+This variable was constructed as the number of bedrooms in excess of household members. Below are the by-year correlations for excess bedroom variables, pulled out from the table above. It appears that both measures of excess bedrooms (share_excess_bdrm_sfh, single-family homes only; and share_excess_bdrm, all units) show weak to modest positive correlations with homelessness. The trend in correlations flips over time for both variables from positive to negative, such that in later years more excess bedrooms is correlated with lower homelessness rates. Excess bedrooms could be acting as a proxy for other structural dynamics within housing markets, or excess bedrooms could indicate less tight housing markets where people have more space to host troubled friends or family who might otherwise experience homelessness. 
+
+## Regressions
+
+```{r, include=FALSE, results='asis'}
+# Data prep
+comp1 <- comp %>%
+  mutate(lhomeless = log(homeless_rate))
+
+#now add formatting for table outputs (2 kinds)
+#but first add in significance stars
+stars_fun <- function(pval) {
+  ifelse(pval < 0.01, "***",
+  ifelse(pval < 0.05, "**",
+  ifelse(pval < 0.1, "*", "")))
+}
+```
+
+**Linear regression with fixed effects**
+
+\begin{tabular}{@{}l@{}}
+\textit{Model 1} \\
+\textit{Model:} linear regression on log of a variable with fixed effects \\
+\textit{Dependent variable:} homeless rate (\texttt{log(homeless\_rate)}) \\
+\textit{Predictors:} \texttt{mgr}, \texttt{share\_pov\_18to64}, \texttt{share\_black}, \texttt{share\_pov\_65plus}, \texttt{welf\_percap}, \texttt{avg\_temp\_jan}, \texttt{crude\_rate} \\
+\textit{Fixed effects:} Year (\texttt{year}) and MSA (\texttt{msa\_number}) \\
+\textit{Errors:} clustered robust standard errors at the CoC level (\texttt{coc\_id})
+\end{tabular}
+
+
+```{r, echo=FALSE, message=FALSE, results='asis'}
+#model 1: Linear FE OLS
+model1 <- feols(
+  lhomeless ~ mgr + share_pov_18to64 + share_black +
+    share_pov_65plus + welf_percap +
+    avg_temp_jan + crude_rate | 
+    year + msa_num,
+  data = comp1,
+  cluster = ~ coc_id
+)
+
+etable(model1,
+       cluster = "coc_id",
+       tex = TRUE,
+       digits = 3,
+       placement = "H",
+       title = "Model 1: Linear FE OLS",
+       se = "cluster")
+```
+
+**Quasi-Poisson regression**
+
+\begin{tabular}{@{}l@{}}
+\textit{Model 2} \\
+\textit{Model:} quasi-Poisson with a log link \\
+\textit{Dependent variable:} homeless count (\texttt{tot\_homeless}) \\
+\textit{Predictors:} \texttt{mgr}, \texttt{share\_pov\_18to64}, \texttt{share\_black}, \texttt{share\_pov\_65plus}, \texttt{welf\_percap}, \texttt{avg\_temp\_jan}, \texttt{crude\_rate} \\
+\textit{Fixed effects:} Year (\texttt{year}) and MSA (\texttt{msa\_number}) \\
+\textit{Errors:} clustered robust standard errors at the CoC level (\texttt{coc\_id})
+\end{tabular}
+
+
+```{r, echo=FALSE, message=FALSE, results='asis'}
+#model 2: Quasi-Poisson GLM
+
+# Fit quasi-Poisson
+model2 <- glm(
+  tot_homeless ~ mgr + share_pov_18to64 + share_black +
+    share_pov_65plus + welf_percap +
+    avg_temp_jan + crude_rate +
+    factor(year) + factor(msa_num),
+  family = quasipoisson(link = "log"),
+  data = comp1
+)
+
+# Clustered SEs
+clustered_vcov <- vcovCL(model2, cluster = ~ coc_id)
+coeft <- coeftest(model2, vcov = clustered_vcov)
+
+# coeftest returns a matrix: convert correctly
+df <- data.frame(
+  Term = rownames(coeft),
+  Estimate = coeft[,1],
+  StdError = coeft[,2],
+  tValue = coeft[,3],
+  pValue = coeft[,4],
+  stringsAsFactors = FALSE
+)
+
+# Add significance stars
+df$Signif <- symnum(df$pValue, corr=FALSE, na=FALSE,
+                    cutpoints=c(0, 0.001, 0.01, 0.05, 0.1, 1),
+                    symbols=c("***","**","*","."," "))
+
+# Combine Estimate + stars
+df$Estimate <- paste0(round(df$Estimate, 3), df$Signif)
+df$StdError <- round(df$StdError, 3)
+df$tValue <- round(df$tValue, 3)
+
+#DROP fixed effects from the table
+df <- df %>% filter(!grepl("^factor\\(", Term))
+
+# LaTeX table
+kable(df[, c("Term","Estimate","StdError","tValue")],
+      format = "latex", booktabs = TRUE,
+      caption = "Model 2: Quasi-Poisson GLM") %>%
+  kable_styling(latex_options = c("striped", position = "H"))%>%
+  footnote(general = "\\{Year and MSA fixed effects included but not shown.}",
+           escape = FALSE,
+           threeparttable = TRUE)
+```
+
+**Poisson regression**
+
+\begin{tabular}{@{}l@{}}
+\textit{Model 3} \\
+\textit{Model:} Poisson regression with a log link \\
+\textit(estimated via \texttt{fixest::fepois} in R; high-dimensional fixed effects and cluster-robust SEs) \\
+\textit{Dependent variable:} homeless count (\texttt{tot\_homeless}) \\
+\textit{Predictors:} \texttt{mgr}, \texttt{share\_pov\_18to64}, \texttt{share\_black}, \texttt{share\_pov\_65plus}, \texttt{welf\_percap}, \texttt{avg\_temp\_jan}, \texttt{crude\_rate} \\
+\textit{Fixed effects:} Year (\texttt{year}) and MSA (\texttt{msa\_number}) \\
+\textit{Errors:} clustered robust standard errors at the CoC level (\texttt{coc\_id})
+\end{tabular}
+
+
+
+```{r, echo=FALSE, message=FALSE, results='asis'}
+#model 3: Poisson FE
+model3 <- fepois(
+  tot_homeless ~ mgr + share_pov_18to64 + share_black +
+    share_pov_65plus + welf_percap +
+    avg_temp_jan + crude_rate | 
+    year + msa_num,
+  data = comp1,
+  cluster = ~ coc_id
+)
+
+etable(model3,
+       cluster = "coc_id",
+       tex = TRUE,
+       digits = 3,
+       placement = "H",
+       title = "Model 3: Poisson FE",
+       se = "cluster")
+```
+
+# Conclusion
+
+Coming soon
