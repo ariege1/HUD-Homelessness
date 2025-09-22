@@ -1,6 +1,10 @@
 # HUD-Homelessness
 UCLA Lewis Center/ Dr. Mike Manville project on factors that may lead to increased homelessness in US cities
 
+**analysis**
+1. (.Rmd) Analysis of panel data to examine the determinants of homelessness at the city level
+2. (.pdf) Pdf output of the .Rmd file above
+
 **hhinccomparison**
 1. (.R) Using PUMS data to find 7 measures related to household income, rent, and personal income
 2. (.png) a scatterplot of how my median household income numbers compared to ACS medians before fixing an error
